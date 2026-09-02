@@ -36,7 +36,7 @@ def now():
 
 
 def public_user(doc):
-    return {"id": str(doc.get("id", "")), "email": doc["email"], "name": doc.get("name", doc["email"].split("@")[0])}
+    return {"id": str(doc.get("id", "")), "email": doc["email"], "name": doc.get("name", doc["email"].split("@")[0]), "sender_email": doc.get("sender_email")}
 
 
 def token_for(user_id):
@@ -73,6 +73,18 @@ class UnsubscribeInput(BaseModel):
     token: str
 
 
+class SenderInput(BaseModel):
+    sender_email: EmailStr
+
+
+class DomainInput(BaseModel):
+    name: str = Field(min_length=3, max_length=253)
+
+
+def user_sender(user) -> str:
+    return (user or {}).get("sender_email") or SENDER_EMAIL
+
+
 def unsubscribe_token(email: str) -> str:
     return hmac.new(JWT_SECRET.encode(), email.lower().encode(), hashlib.sha256).hexdigest()[:32]
 
@@ -105,14 +117,14 @@ def marketing_html(text: str, recipient: str) -> str:
 class EmailProviderAdapter:
     name = "base"
 
-    async def send(self, recipient: str, subject: str, html: str, idempotency_key: str, list_unsubscribe: Optional[str] = None) -> dict:
+    async def send(self, recipient: str, subject: str, html: str, idempotency_key: str, list_unsubscribe: Optional[str] = None, sender: Optional[str] = None) -> dict:
         raise NotImplementedError
 
 
 class MockEmailProvider(EmailProviderAdapter):
     name = "mock"
 
-    async def send(self, recipient, subject, html, idempotency_key, list_unsubscribe=None):
+    async def send(self, recipient, subject, html, idempotency_key, list_unsubscribe=None, sender=None):
         return {"provider_id": f"mock_{uuid.uuid4().hex}", "status": "accepted"}
 
 
@@ -124,12 +136,12 @@ class ResendEmailProvider(EmailProviderAdapter):
             raise RuntimeError("RESEND_API_KEY is not configured")
         resend.api_key = RESEND_API_KEY
 
-    async def send(self, recipient, subject, html, idempotency_key, list_unsubscribe=None):
+    async def send(self, recipient, subject, html, idempotency_key, list_unsubscribe=None, sender=None):
         headers = {"X-MailPilot-Idempotency-Key": idempotency_key}
         if list_unsubscribe:
             headers["List-Unsubscribe"] = f"<{list_unsubscribe}>"
             headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
-        params = {"from": SENDER_EMAIL, "to": [recipient], "subject": subject, "html": html, "headers": headers}
+        params = {"from": sender or SENDER_EMAIL, "to": [recipient], "subject": subject, "html": html, "headers": headers}
         result = await asyncio.to_thread(resend.Emails.send, params)
         if not isinstance(result, dict) or not result.get("id"):
             raise RuntimeError("Resend did not return a message id")
@@ -155,6 +167,11 @@ def provider_error_message(exc: Exception) -> str:
             "Resend is in restricted mode: with onboarding@resend.dev you can only send to the account owner's email. "
             "Verify a sender domain at resend.com/domains and set SENDER_EMAIL to send to other recipients."
         )
+    if "restricted" in lowered and "send" in lowered:
+        return (
+            "This Resend API key is restricted to sending only. To manage domains from MailPilot, "
+            "create a Full Access API key at resend.com/api-keys and set RESEND_API_KEY."
+        )
     if "invalid api key" in lowered or "unauthorized" in lowered or "401" in lowered:
         return "The email provider rejected the request due to an invalid API key. Update RESEND_API_KEY and try again."
     if "rate" in lowered and "limit" in lowered:
@@ -172,6 +189,7 @@ async def register(data: AuthInput):
         "email": email,
         "name": data.name or email.split("@")[0],
         "password_hash": bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode(),
+        "sender_email": None,
         "created_at": now(),
     }
     await db.users.insert_one(user)
@@ -191,22 +209,22 @@ async def me(user=Depends(current_user)):
     return public_user(user)
 
 
-async def send_transactional(recipient, subject, body, kind, campaign_id=None, recipient_id=None):
+async def send_transactional(recipient, subject, body, kind, sender=None, campaign_id=None, recipient_id=None):
     adapter = provider()
     key = f"{kind}:{campaign_id or uuid.uuid4()}:{recipient_id or recipient}"
-    return await adapter.send(recipient, subject, html_body(body), key)
+    return await adapter.send(recipient, subject, html_body(body), key, sender=sender)
 
 
-async def send_marketing(recipient, subject, body, kind, campaign_id=None, recipient_id=None):
+async def send_marketing(recipient, subject, body, kind, sender=None, campaign_id=None, recipient_id=None):
     adapter = provider()
     key = f"{kind}:{campaign_id or uuid.uuid4()}:{recipient_id or recipient}"
-    return await adapter.send(recipient, subject, marketing_html(body, recipient), key, list_unsubscribe=unsubscribe_link(recipient))
+    return await adapter.send(recipient, subject, marketing_html(body, recipient), key, list_unsubscribe=unsubscribe_link(recipient), sender=sender)
 
 
 @api.post("/mail/single")
 async def single_mail(data: MailInput, user=Depends(current_user)):
     try:
-        result = await send_transactional(str(data.recipient), data.subject, data.body, "single")
+        result = await send_transactional(str(data.recipient), data.subject, data.body, "single", sender=user_sender(user))
     except Exception as exc:
         logger.warning("single-send failure: %s: %s", type(exc).__name__, str(exc)[:200])
         raise HTTPException(400, provider_error_message(exc))
@@ -227,7 +245,7 @@ async def single_mail(data: MailInput, user=Depends(current_user)):
 @api.post("/mail/test")
 async def test_mail(data: MailInput, user=Depends(current_user)):
     try:
-        result = await send_transactional(str(data.recipient), data.subject, data.body, "test")
+        result = await send_transactional(str(data.recipient), data.subject, data.body, "test", sender=user_sender(user))
     except Exception as exc:
         logger.warning("test-send failure: %s: %s", type(exc).__name__, str(exc)[:200])
         raise HTTPException(400, provider_error_message(exc))
@@ -339,6 +357,7 @@ async def campaign_test(campaign_id: str, recipient: EmailStr = Form(...), user=
             marketing_html(campaign["body"], str(recipient)),
             key,
             list_unsubscribe=unsubscribe_link(str(recipient)),
+            sender=user_sender(user),
         )
     except Exception as exc:
         logger.warning("campaign-test failure: %s: %s", type(exc).__name__, str(exc)[:200])
@@ -407,6 +426,8 @@ async def process_job(job_id: str):
     campaign = await db.campaigns.find_one({"id": job["campaign_id"], "user_id": job["user_id"]}, {"_id": 0})
     if not campaign:
         return
+    owner = await db.users.find_one({"id": job["user_id"]}, {"_id": 0})
+    sender = user_sender(owner)
     await db.campaigns.update_one({"id": job["campaign_id"]}, {"$set": {"status": "SENDING", "updated_at": now()}})
     recipients = await db.recipients.find(
         {"campaign_id": job["campaign_id"], "sending_status": "QUEUED"}, {"_id": 0}
@@ -434,6 +455,7 @@ async def process_job(job_id: str):
                     marketing_html(campaign["body"], rec["email"]),
                     key,
                     list_unsubscribe=unsubscribe_link(rec["email"]),
+                    sender=sender,
                 )
                 await db.recipients.update_one(
                     {"id": rec["id"]},
@@ -596,6 +618,112 @@ async def resend_webhook(request: Request):
 async def usage(user=Depends(current_user)):
     latest = await db.campaigns.find_one({"user_id": user["id"]}, {"_id": 0}, sort=[("created_at", -1)])
     return {"limit": LIMIT, "used": latest.get("recipient_count", 0) if latest else 0}
+
+
+@api.get("/campaigns/{campaign_id}/recipients")
+async def campaign_recipients(campaign_id: str, status: Optional[str] = None, limit: int = 500, user=Depends(current_user)):
+    campaign = await db.campaigns.find_one({"id": campaign_id, "user_id": user["id"]}, {"_id": 0})
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+    query = {"campaign_id": campaign_id, "user_id": user["id"]}
+    if status:
+        query["sending_status"] = status.upper()
+    items = await db.recipients.find(query, {"_id": 0}).limit(max(1, min(limit, LIMIT))).to_list(LIMIT)
+    return {"campaign_id": campaign_id, "count": len(items), "recipients": items}
+
+
+@api.get("/settings/sender")
+async def get_sender(user=Depends(current_user)):
+    return {
+        "sender_email": user.get("sender_email") or None,
+        "default_sender_email": SENDER_EMAIL,
+        "provider": EMAIL_PROVIDER,
+    }
+
+
+@api.put("/settings/sender")
+async def set_sender(data: SenderInput, user=Depends(current_user)):
+    await db.users.update_one({"id": user["id"]}, {"$set": {"sender_email": str(data.sender_email).lower()}})
+    return {"sender_email": str(data.sender_email).lower()}
+
+
+@api.delete("/settings/sender")
+async def clear_sender(user=Depends(current_user)):
+    await db.users.update_one({"id": user["id"]}, {"$set": {"sender_email": None}})
+    return {"sender_email": None, "default_sender_email": SENDER_EMAIL}
+
+
+def _resend_ready():
+    if EMAIL_PROVIDER != "resend":
+        raise HTTPException(400, "Domain management is only available when EMAIL_PROVIDER=resend.")
+    if not RESEND_API_KEY:
+        raise HTTPException(400, "RESEND_API_KEY is not configured on the server.")
+    resend.api_key = RESEND_API_KEY
+
+
+def _sanitize_domain(record):
+    if not isinstance(record, dict):
+        return record
+    keep = ["id", "name", "status", "region", "created_at", "records"]
+    return {k: record.get(k) for k in keep if k in record}
+
+
+@api.get("/settings/domains")
+async def list_domains(user=Depends(current_user)):
+    if EMAIL_PROVIDER != "resend":
+        return {"provider": EMAIL_PROVIDER, "domains": [], "can_manage": False, "reason": "Mock provider does not support domain management."}
+    _resend_ready()
+    try:
+        result = await asyncio.to_thread(resend.Domains.list)
+    except Exception as exc:
+        logger.warning("Domains.list failure: %s: %s", type(exc).__name__, str(exc)[:200])
+        return {"provider": "resend", "domains": [], "can_manage": False, "reason": provider_error_message(exc)}
+    items = result.get("data", []) if isinstance(result, dict) else (result or [])
+    return {"provider": "resend", "domains": [_sanitize_domain(d) for d in items], "can_manage": True}
+
+
+@api.post("/settings/domains")
+async def add_domain(data: DomainInput, user=Depends(current_user)):
+    _resend_ready()
+    try:
+        result = await asyncio.to_thread(resend.Domains.create, {"name": data.name.strip().lower()})
+    except Exception as exc:
+        logger.warning("Domains.create failure: %s: %s", type(exc).__name__, str(exc)[:200])
+        raise HTTPException(400, provider_error_message(exc))
+    return {"domain": _sanitize_domain(result)}
+
+
+@api.get("/settings/domains/{domain_id}")
+async def get_domain(domain_id: str, user=Depends(current_user)):
+    _resend_ready()
+    try:
+        result = await asyncio.to_thread(resend.Domains.get, domain_id)
+    except Exception as exc:
+        logger.warning("Domains.get failure: %s: %s", type(exc).__name__, str(exc)[:200])
+        raise HTTPException(400, provider_error_message(exc))
+    return {"domain": _sanitize_domain(result)}
+
+
+@api.post("/settings/domains/{domain_id}/verify")
+async def verify_domain(domain_id: str, user=Depends(current_user)):
+    _resend_ready()
+    try:
+        result = await asyncio.to_thread(resend.Domains.verify, domain_id)
+    except Exception as exc:
+        logger.warning("Domains.verify failure: %s: %s", type(exc).__name__, str(exc)[:200])
+        raise HTTPException(400, provider_error_message(exc))
+    return {"domain": _sanitize_domain(result) if isinstance(result, dict) else {"id": domain_id, "status": "verifying"}}
+
+
+@api.delete("/settings/domains/{domain_id}")
+async def remove_domain(domain_id: str, user=Depends(current_user)):
+    _resend_ready()
+    try:
+        await asyncio.to_thread(resend.Domains.remove, domain_id)
+    except Exception as exc:
+        logger.warning("Domains.remove failure: %s: %s", type(exc).__name__, str(exc)[:200])
+        raise HTTPException(400, provider_error_message(exc))
+    return {"removed": True}
 
 
 app.include_router(api)

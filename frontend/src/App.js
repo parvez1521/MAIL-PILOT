@@ -13,12 +13,15 @@ import {
   Menu,
   X,
   Loader2,
+  Globe,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { api, auth, errorText } from "@/lib/apiClient";
 import { Page, Status } from "@/components/Layout";
 import Bulk from "@/pages/Bulk";
 import Unsubscribe from "@/pages/Unsubscribe";
+import CampaignDetail from "@/pages/CampaignDetail";
+import DomainSetup from "@/pages/DomainSetup";
 import "@/App.css";
 
 function AuthPage({ signup = false }) {
@@ -122,6 +125,7 @@ function Shell({ children }) {
     ["/single", "Single mail", Send],
     ["/bulk", "Bulk campaign", Users],
     ["/test", "Test mail", FlaskConical],
+    ["/domain", "Sender domain", Globe],
   ];
   function logout() {
     localStorage.removeItem("mailpilot_token");
@@ -274,14 +278,19 @@ function Dashboard() {
           </div>
           {campaigns.length ? (
             campaigns.slice(0, 5).map((c) => (
-              <div key={c.id} className="campaign-row" data-testid={`campaign-row-${c.id}`}>
+              <NavLink
+                key={c.id}
+                to={`/campaigns/${c.id}`}
+                className="campaign-row"
+                data-testid={`campaign-row-${c.id}`}
+              >
                 <span className="campaign-dot" />
                 <div>
                   <b>{c.name}</b>
                   <small>{c.recipient_count} recipients</small>
                 </div>
                 <Status status={c.status} />
-              </div>
+              </NavLink>
             ))
           ) : (
             <div className="empty" data-testid="campaigns-empty">
@@ -460,6 +469,8 @@ function Protected() {
         <Route path="/single" element={<Composer />} />
         <Route path="/test" element={<Composer kind="test" />} />
         <Route path="/bulk" element={<Bulk />} />
+        <Route path="/campaigns/:id" element={<CampaignDetail />} />
+        <Route path="/domain" element={<DomainSetup />} />
         <Route path="/settings" element={<Settings />} />
       </Routes>
     </Shell>
