@@ -199,25 +199,18 @@ def test_full_bulk_happy_path_with_progress_and_webhooks():
     assert prog["delivered_count"] == 1
     assert prog["failed_count"] == 1
 
-    # Second campaign — complained email should be SUPPRESSED
-    csv2 = f"email\n{emails[2]}\nfresh_{uuid.uuid4().hex[:6]}@example.com\n".encode()
+    # Second campaign — complained email should be auto-cleaned before insertion
+    fresh = f"fresh_{uuid.uuid4().hex[:6]}@example.com"
+    csv2 = f"email\n{emails[2]}\n{fresh}\n".encode()
     r = s.post(
         f"{BASE_URL}/api/campaigns",
         data={"name": "supp", "subject": "S", "body": "B"},
         files={"file": ("s.csv", csv2, "text/csv")}, timeout=30,
     )
-    cid2 = r.json()["campaign"]["id"]
-    s.post(f"{BASE_URL}/api/campaigns/{cid2}/test", data={"recipient": emails[0]}, timeout=30)
-    s.post(f"{BASE_URL}/api/campaigns/{cid2}/confirm", timeout=30)
-    s.post(f"{BASE_URL}/api/campaigns/{cid2}/send", timeout=30)
-    for _ in range(20):
-        p = s.get(f"{BASE_URL}/api/campaigns/{cid2}/progress", timeout=15).json()
-        if p["status"] == "COMPLETED":
-            break
-        time.sleep(1)
-    detail2 = s.get(f"{BASE_URL}/api/campaigns/{cid2}", timeout=15).json()
-    status2 = {r["email"]: r["sending_status"] for r in detail2["recipients"]}
-    assert status2[emails[2]] == "SUPPRESSED", f"got {status2}"
+    body2 = r.json()
+    assert body2["auto_cleaned_count"] == 1, body2
+    assert emails[2] in body2["auto_cleaned_emails"]
+    assert body2["campaign"]["valid_count"] == 1
 
 
 # -------------------- Unsubscribe HMAC flow --------------------
@@ -250,5 +243,8 @@ def test_no_resend_key_in_frontend_bundle():
         js = requests.get(BASE_URL + path, timeout=20).text
         checked += 1
         assert "re_hf2" not in js
-        assert "RESEND_API_KEY" not in js
+        # The literal env-var name may appear as UI copy (DomainSetup notice); only the
+        # actual key material (long re_ prefix) must be absent. `re_` used as JS identifier
+        # prefix (e.g. re_reason) is not a leak.
+        assert not re.search(r"\bre_[A-Za-z0-9]{20,}", js)
     assert checked > 0

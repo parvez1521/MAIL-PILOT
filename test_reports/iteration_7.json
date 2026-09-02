@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration 7 (scope-frozen) verification of all 19 core items complete. Backend regression suite ran in BOTH EMAIL_PROVIDER=resend (6 passed, 1 mock-only skipped) AND EMAIL_PROVIDER=mock (6 passed, 1 resend-only skipped) — union of 7/7 tests pass. Frontend end-to-end bulk workflow verified in mock mode: register->/bulk->Details(3 CSV rows)->Validate(valid_count=3)->Preview->Test(campaign-test-sent-message)->Confirm->Send->ProgressStep(NOT instantly completed)->polled to COMPLETED with progress-percentage=100. Campaign detail /campaigns/:id verified: delivery-feed present at top with 3 'sent' events, all 6 metric cards render (Total=3, Delivered/Sent/Bounced/Complained/Failed), filter chips + recipients-table render, back-link works. Domain page renders sender-section, sender-email-input, domain-section AND domain-restricted-notice (mock provider returns can_manage=false). Mobile hamburger visible at 380x780 and opens sidebar. Unsubscribe HMAC page renders with confirm button. Security: 're_' key material is NOT present in served JS bundle (checked served /static/js/bundle.js, 3.06 MB — 0 matches for 're_hf2', 0 matches for 're_[A-Za-z0-9]{20,}'). The literal string 'RESEND_API_KEY' does appear as visible UI copy in the DomainSetup restricted-notice — this is a variable *name*, not the secret, and is intentional user-facing documentation. EMAIL_PROVIDER restored to 'resend' after tests. NO regressions found; NO new features proposed.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_iter7_resend.xml",
+    "/app/test_reports/pytest/pytest_iter7_mock.xml",
+    "/app/test_reports/ui/campaign_detail.png",
+    "/app/test_reports/ui/mobile_menu.png"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py list_domains correctly returns can_manage=false with a human-readable reason for both mock provider AND restricted send-only Resend keys — good defensive branching.",
+    "known_bad_emails() auto-cleans complained/bounced addresses before recipient insertion (not just marking SUPPRESSED at send time); the /api/campaigns response exposes auto_cleaned_count and auto_cleaned_emails so the UI can surface it. This is the correct product behavior per PRD.",
+    "Frontend uses localStorage.getItem('mailpilot_token') for JWT — still susceptible to XSS token theft; consider httpOnly cookie + CSRF if auth hardening becomes in-scope (not part of the frozen 19 items)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py (relaxed 'RESEND_API_KEY' literal check to a real key-material regex, and rewrote second-campaign assertion to verify auto_cleaned_count instead of SUPPRESSED — because server pre-filters bounced/complained addresses at campaign creation, they never enter the recipients table)",
+    "/app/backend/.env (temporarily toggled EMAIL_PROVIDER to 'mock' for the send-loop tests; RESTORED to 'resend' at the end — verified via grep)"
+  ],
+  "success_rate": {"backend": "100% (union 7/7 across resend+mock runs)", "frontend": "100% (bulk e2e, campaign detail, mobile hamburger, domain page, unsubscribe page, reduced-motion)"},
+  "test_credentials": "Fresh users created per-test via POST /api/auth/register with password 'testpass123'. No shared/seeded credentials required.",
+  "seed_data_creation": "No production seed data touched. All campaigns/recipients/suppressions used random UUID-hex emails.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Scope is FROZEN to the 19 items — do NOT propose or add new features. To re-run: (1) `pytest /app/backend/tests/backend_test.py` with EMAIL_PROVIDER=resend covers 5 non-mock tests (provider error mapping, 500 limit, bulk gate, unsubscribe HMAC, no key leak, register/login/me/401). (2) Toggle EMAIL_PROVIDER=mock, restart backend, re-run to cover the full happy-path test with progress polling + webhook mapping. (3) ALWAYS restore EMAIL_PROVIDER=resend at end. Frontend token key is 'mailpilot_token' (NOT 'token'). Correct testids on CampaignDetail: campaign-back-link (not back-link), filter-<lower> e.g. filter-sent (not filter-chip-SENT). DomainSetup restricted-notice testid is 'domain-restricted-notice'. In mock mode, /api/settings/domains returns can_manage=false with 'Mock provider does not support domain management.' reason so restricted-notice renders correctly.",
+  "rca of the issue": "No new issues. The only two test failures encountered during this run were in my own test script (not production code): (a) the RESEND_API_KEY literal-string check was too strict because the variable name legitimately appears as user-facing copy in DomainSetup's restricted-notice — refined the assertion to search for actual key material (re_[A-Za-z0-9]{20,}) instead of the variable name; (b) the second-campaign SUPPRESSED assertion incorrectly expected the complained email to appear in recipients with SUPPRESSED status, but server.py auto-cleans known bad emails at campaign-creation time so they never become recipients — refined the assertion to verify auto_cleaned_count=1 and auto_cleaned_emails contains the complained address, matching the actual product behavior described in review item #9 ('Bounce auto-clean')."
+}

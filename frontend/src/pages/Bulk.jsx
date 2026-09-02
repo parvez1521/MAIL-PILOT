@@ -343,6 +343,8 @@ function AnimatedCounter({ value }) {
 function ProgressStep({ campaignId, onStatus }) {
   const [detail, setDetail] = useState(null);
   const stop = useRef(false);
+  const onStatusRef = useRef(onStatus);
+  useEffect(() => { onStatusRef.current = onStatus; }, [onStatus]);
   useEffect(() => {
     stop.current = false;
     let timer;
@@ -351,7 +353,7 @@ function ProgressStep({ campaignId, onStatus }) {
         const r = await api.get(`/campaigns/${campaignId}/progress`, auth());
         if (stop.current) return;
         setDetail(r.data);
-        onStatus?.(r.data.status);
+        onStatusRef.current?.(r.data.status);
         if (["QUEUED", "READY_TO_SEND", "SENDING"].includes(r.data.status)) {
           timer = setTimeout(tick, 2000);
         }
