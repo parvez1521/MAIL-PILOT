@@ -1,0 +1,37 @@
+{
+  "summary": "Phase 2 regression complete. All acceptance criteria PASS: provider errors now return JSON 400 (not 502 HTML), 500-recipient limit enforced, bulk gate enforced, mock-mode happy path queues in background and progress reflects real polling, webhook mapping distinguishes COMPLAINED from BOUNCED and inserts suppression, complained address is SUPPRESSED in subsequent campaigns, HMAC unsubscribe flow works, no Resend API key found in frontend JS bundle, and UI ProgressStep polls /progress correctly instead of showing instant completion. EMAIL_PROVIDER restored to 'resend' after tests.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Bulk ProgressStep header", "issue": "Top status badge in review-top continues to show 'SENDING' (from cached data.campaign.status) even after the LIVE PROGRESS panel shows COMPLETED. Cosmetic only — the source-of-truth progress bar and campaign-complete-message are correct. Consider syncing review-top badge with detail.status from the polled progress payload.", "selector": ".review-top .status", "priority": "LOW"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_iter6_resend.xml",
+    "/app/test_reports/pytest/pytest_iter6_mock.xml"
+  ],
+  "action_items": [
+    "Optional: sync top campaign status badge on ProgressStep with detail.status from /progress polling (cosmetic).",
+    "Optional hardening: switch CORS_ORIGINS from '*' to explicit list (FRONTEND_URL) and consider httpOnly cookie auth if playbook auth hardening is in scope for a future phase."
+  ],
+  "critical_code_review_comments": [
+    "server.py refresh_counts + recipient sending_status mapping is clean and idempotent; webhook uses find_one_and_update by provider_message_id which is correct.",
+    "process_job increments retry_count on every attempt (via $inc inside the QUEUED->SENDING transition) — after 3 attempts retry_count can reach 3; acceptable but consider exposing final retry count for observability.",
+    "Bulk /send returns status=SENDING synchronously and enqueues BackgroundTasks (in-process). For >500 recipient workloads this is fine given the 500 limit, but production usage should move to an external queue (Celery/RQ) so a process restart does not drop jobs.",
+    "auth uses long-lived (7d) JWT in localStorage — susceptible to XSS token theft. Consider httpOnly cookie + CSRF if auth hardening is in scope."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py",
+    "/app/backend/.env (temporarily toggled to mock; restored to resend)"
+  ],
+  "success_rate": {"backend": "100% (6/6 non-skipped tests across both provider modes)", "frontend": "100% (bulk workflow end-to-end + unsubscribe flow)"},
+  "test_credentials": "Fresh users registered per-test via /api/auth/register with password 'testpass123'.",
+  "seed_data_creation": "No production/seed data modified. All test users/campaigns/suppressions were created with random unique emails.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "backend_test.py auto-detects EMAIL_PROVIDER from /app/backend/.env and skips provider-conditional tests appropriately. Run once with EMAIL_PROVIDER=resend and once with mock for full coverage. JWT_SECRET is read from backend .env for HMAC unsubscribe token computation. Frontend ProgressStep polls every 2s while status is QUEUED/READY_TO_SEND/SENDING — verified. Only minor cosmetic issue: review-top status badge stays 'SENDING' after completion because component reads cached data.campaign.status, not the polled detail.status.",
+  "rca of the issue": "Prior iteration_5 findings all resolved: (1) provider_error_message(exc) now converts Resend SDK exceptions to HTTPException(400, string) — verified with 'someone@example.com' returning JSON 400 with the mapped 'placeholder domains are not deliverable' message. (2) Webhook handler now maps email.complained to sending_status=COMPLAINED (distinct from BOUNCED) and upserts suppression using data.to — verified via test_full_bulk_happy_path assertions and the follow-up campaign showing SUPPRESSED. (3) Bulk send now enqueues BackgroundTasks(process_job) and returns 200 with status=SENDING+job_id immediately; ProgressStep in Bulk.jsx polls /api/campaigns/{id}/progress every 2s and only renders campaign-complete-message when detail.status=='COMPLETED' — verified with initial poll showing 67% before completion."
+}

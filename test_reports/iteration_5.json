@@ -1,0 +1,31 @@
+{
+  "summary": "Real-provider regression testing completed: auth, protected access, CSV limit validation, invalid recipient validation, webhook acceptance, frontend load, and mobile login passed; Resend single/test submissions failed with HTTP 502.",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "/api/mail/single", "issue": "With EMAIL_PROVIDER=resend, a valid recipient submission returns HTTP 502 and no provider message id.", "priority": "HIGH"},
+      {"endpoint": "/api/mail/test and /api/campaigns/{id}/test", "issue": "Real provider test submissions also return HTTP 502, so TEST_SENT cannot be reached and bulk campaigns remain blocked.", "priority": "HIGH"},
+      {"endpoint": "/api/webhooks/resend", "issue": "email.complained is persisted as BOUNCED rather than a distinct COMPLAINED state required by the specification.", "priority": "HIGH"}
+    ],
+    "minor": [
+      {"endpoint": "authentication/CORS", "issue": "Login uses bearer tokens in localStorage; no httpOnly cookie is set, and CORS_ORIGINS defaults to '*'. This does not meet the requested auth hardening/playbook expectations."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {"flow": "Single and test email submission", "issue": "Provider failure is surfaced as a gateway HTML 502 rather than the intended JSON error, leaving the UI without its configured error message in live probing.", "affected_selectors": ["[data-testid='single-error']", "[data-testid='test-error']"]},
+      {"flow": "Bulk send completion", "issue": "Frontend immediately changes campaign state to COMPLETED after queue acceptance; it does not poll/display the server-side job or actual progress.", "affected_selectors": ["[data-testid='campaign-send-button']", "[data-testid='campaign-complete-message']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results_iteration5_live.xml"],
+  "action_items": ["Diagnose Resend SDK/account/sender acceptance failure and return a stable JSON 502 detail without gateway HTML; verify onboarding@resend.dev/account restrictions.", "Add a distinct COMPLAINED recipient status and counter/webhook mapping.", "Expose server-side job status/progress to the frontend instead of claiming completion on queue response.", "Use explicit CORS origins and the required secure auth/session strategy if auth hardening is in scope."],
+  "critical_code_review_comments": ["Resend provider exceptions are swallowed into a generic 502, making the application unable to distinguish provider/account failure from malformed configuration; log only sanitized exception metadata.", "The existing regression suite still asserts MOCKED/SENT response values and is incompatible with EMAIL_PROVIDER=resend; it must be split into explicit mock and real-provider suites."],
+  "updated_files": ["/app/test_reports/iteration_5.json"],
+  "success_rate": {"backend": "50% (2/4 existing tests; 2 failures are stale mock assertions plus real-provider failure)", "frontend": "100% for load/responsive smoke only"},
+  "seed_data_creation": "Created temporary uniquely named signup users and no production/seed records were modified.",
+  "retest_needed": true,
+  "should_call_test_agent_after_fix": true,
+  "context_for_next_testing_agent": "Public preview URL tested. Auth and validation smoke passed. Valid real Resend single/test calls both returned 502; no API key was printed or found in frontend source grep. Re-run provider acceptance, campaign TEST_SENT gate, queue progress, and webhook status after fixes.",
+  "rca of the issue": "The backend selects Resend correctly and calls resend.Emails.send server-side, but any provider exception is converted to HTTPException(502). Live valid submissions returned a gateway 502, preventing acceptance and campaign progression. Exact upstream reason is hidden by the broad exception handler and should be captured in sanitized backend logs/provider diagnostics."
+}
