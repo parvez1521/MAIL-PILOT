@@ -140,6 +140,7 @@ function DetailsStep({ form, setForm, onSubmit, error, submitting }) {
 }
 
 function ValidateStep({ data, onNext }) {
+  const cleaned = data.auto_cleaned_count || 0;
   return (
     <motion.div {...fadeSlide}>
       <div className="count-grid">
@@ -152,10 +153,28 @@ function ValidateStep({ data, onNext }) {
           <span>Invalid entries</span>
         </div>
         <div>
-          <strong>{500 - data.campaign.valid_count}</strong>
-          <span>Remaining capacity</span>
+          <strong data-testid="auto-cleaned-count">{cleaned}</strong>
+          <span>Auto-cleaned (bounces / suppressions)</span>
         </div>
       </div>
+      {cleaned > 0 && (
+        <motion.div
+          className="notice ok-notice"
+          initial={{ opacity: 0, y: 4 }}
+          animate={{ opacity: 1, y: 0 }}
+          data-testid="auto-cleaned-notice"
+        >
+          <Sparkles size={18} />
+          <div>
+            <b>{cleaned} recipient{cleaned === 1 ? "" : "s"} auto-cleaned</b>
+            <p>
+              {data.auto_cleaned_emails?.slice(0, 3).join(", ")}
+              {cleaned > 3 ? `, and ${cleaned - 3} more` : ""} previously bounced, complained, or unsubscribed.
+              We removed them so your reputation stays healthy.
+            </p>
+          </div>
+        </motion.div>
+      )}
       <button
         className="primary-btn"
         data-testid="review-preview-button"

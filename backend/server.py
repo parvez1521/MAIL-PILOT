@@ -287,6 +287,9 @@ async def create_campaign(
     user=Depends(current_user),
 ):
     valid, invalid = parse_recipients(await file.read())
+    bad = await known_bad_emails(user["id"])
+    auto_cleaned = [e for e in valid if e in bad]
+    valid = [e for e in valid if e not in bad]
     if len(valid) > LIMIT:
         raise HTTPException(400, f"Campaigns are limited to {LIMIT} valid recipients")
     cid = str(uuid.uuid4())
@@ -335,7 +338,7 @@ async def create_campaign(
             }
             for e in valid
         ])
-    return {"campaign": {k: v for k, v in campaign.items() if k != "_id"}, "invalid_emails": invalid}
+    return {"campaign": {k: v for k, v in campaign.items() if k != "_id"}, "invalid_emails": invalid, "auto_cleaned_emails": auto_cleaned, "auto_cleaned_count": len(auto_cleaned)}
 
 
 @api.get("/campaigns")
@@ -388,6 +391,31 @@ async def confirm_campaign(campaign_id: str, user=Depends(current_user)):
     if not result.modified_count:
         raise HTTPException(400, "Send a test email before confirming")
     return {"message": "Campaign is ready to send", "status": "READY_TO_SEND"}
+
+
+async def log_event(user_id, campaign_id, email, type_, recipient_id=None, provider_id=None, reason=None):
+    await db.delivery_events.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "campaign_id": campaign_id,
+        "recipient_id": recipient_id,
+        "email": email,
+        "type": type_,
+        "reason": reason,
+        "provider_message_id": provider_id,
+        "at": now(),
+    })
+
+
+async def known_bad_emails(user_id):
+    supp = set(await db.suppressions.distinct("email"))
+    bad = set(
+        await db.recipients.distinct(
+            "email",
+            {"user_id": user_id, "sending_status": {"$in": ["BOUNCED", "COMPLAINED", "FAILED"]}},
+        )
+    )
+    return supp | bad
 
 
 async def refresh_counts(campaign_id: str):
@@ -461,6 +489,7 @@ async def process_job(job_id: str):
                     {"id": rec["id"]},
                     {"$set": {"sending_status": "SENT", "provider_message_id": result["provider_id"], "sent_at": now()}},
                 )
+                await log_event(job["user_id"], job["campaign_id"], rec["email"], "sent", recipient_id=rec["id"], provider_id=result["provider_id"])
                 success = True
                 break
             except Exception as exc:
@@ -472,6 +501,7 @@ async def process_job(job_id: str):
                 {"id": rec["id"]},
                 {"$set": {"sending_status": "FAILED", "failure_reason": reason}},
             )
+            await log_event(job["user_id"], job["campaign_id"], rec["email"], "failed", recipient_id=rec["id"], reason=reason)
         await refresh_counts(job["campaign_id"])
         await asyncio.sleep(0.25)
     await db.sending_jobs.update_one({"id": job["id"]}, {"$set": {"status": "COMPLETED", "completed_at": now()}})
@@ -610,6 +640,24 @@ async def resend_webhook(request: Request):
             {"provider_message_id": provider_id}, {"$set": updates}
         )
         if recipient and recipient.get("campaign_id"):
+            event_map = {
+                "email.sent": "sent",
+                "email.delivered": "delivered",
+                "email.bounced": "bounced",
+                "email.complained": "complained",
+                "email.failed": "failed",
+            }
+            mapped = event_map.get(event_type)
+            if mapped:
+                await log_event(
+                    recipient.get("user_id"),
+                    recipient["campaign_id"],
+                    recipient.get("email", ""),
+                    mapped,
+                    recipient_id=recipient.get("id"),
+                    provider_id=provider_id,
+                    reason=updates.get("failure_reason"),
+                )
             await refresh_counts(recipient["campaign_id"])
     return {"received": True}
 
@@ -630,6 +678,26 @@ async def campaign_recipients(campaign_id: str, status: Optional[str] = None, li
         query["sending_status"] = status.upper()
     items = await db.recipients.find(query, {"_id": 0}).limit(max(1, min(limit, LIMIT))).to_list(LIMIT)
     return {"campaign_id": campaign_id, "count": len(items), "recipients": items}
+
+
+@api.get("/campaigns/{campaign_id}/events")
+async def campaign_events(campaign_id: str, limit: int = 30, user=Depends(current_user)):
+    campaign = await db.campaigns.find_one({"id": campaign_id, "user_id": user["id"]}, {"_id": 0})
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+    events = (
+        await db.delivery_events.find({"campaign_id": campaign_id, "user_id": user["id"]}, {"_id": 0})
+        .sort("at", -1)
+        .limit(max(1, min(limit, 200)))
+        .to_list(200)
+    )
+    return {"events": events}
+
+
+@api.get("/suppressions")
+async def list_suppressions(user=Depends(current_user)):
+    bad = await known_bad_emails(user["id"])
+    return {"count": len(bad), "emails": sorted(bad)}
 
 
 @api.get("/settings/sender")
@@ -742,6 +810,7 @@ async def startup():
     await db.recipients.create_index([("campaign_id", 1), ("email", 1)], unique=True)
     await db.recipients.create_index("provider_message_id", sparse=True)
     await db.suppressions.create_index("email", unique=True)
+    await db.delivery_events.create_index([("campaign_id", 1), ("at", -1)])
 
 
 @app.on_event("shutdown")

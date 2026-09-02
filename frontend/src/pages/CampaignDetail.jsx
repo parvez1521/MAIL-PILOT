@@ -11,6 +11,7 @@ import {
   Ban,
   ShieldOff,
   Send,
+  Radio,
 } from "lucide-react";
 import { api, auth, errorText } from "@/lib/apiClient";
 import { Page, Status } from "@/components/Layout";
@@ -39,6 +40,99 @@ function formatDate(v) {
   } catch {
     return v;
   }
+}
+
+const EVENT_META = {
+  sent: { label: "Sent", tone: "info", icon: Send },
+  delivered: { label: "Delivered", tone: "ok", icon: Check },
+  bounced: { label: "Bounced", tone: "err", icon: AlertTriangle },
+  complained: { label: "Complained", tone: "err", icon: Ban },
+  failed: { label: "Failed", tone: "err", icon: X },
+  suppressed: { label: "Suppressed", tone: "muted", icon: ShieldOff },
+};
+
+function relativeTime(ts) {
+  if (!ts) return "";
+  const diff = Math.max(0, (Date.now() - new Date(ts).getTime()) / 1000);
+  if (diff < 5) return "just now";
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
+function DeliveryFeed({ campaignId, live }) {
+  const [events, setEvents] = useState([]);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    let timer;
+    const load = async () => {
+      try {
+        const r = await api.get(`/campaigns/${campaignId}/events`, { ...auth(), params: { limit: 30 } });
+        if (cancelled) return;
+        setEvents(r.data.events || []);
+      } catch {}
+      if (!cancelled) timer = setTimeout(load, live ? 3000 : 15000);
+    };
+    load();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [campaignId, live]);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 15000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <section className="feed-section" data-testid="delivery-feed">
+      <div className="feed-head">
+        <div>
+          <p className="eyebrow">LIVE DELIVERY FEED</p>
+          <h2>Recent inbox activity</h2>
+        </div>
+        <span className={`feed-live ${live ? "on" : ""}`} title={live ? "Auto-refreshing" : "Idle"}>
+          <Radio size={14} /> {live ? "Live" : "Idle"}
+        </span>
+      </div>
+      {events.length === 0 ? (
+        <div className="feed-empty" data-testid="feed-empty">
+          <span className="empty-icon"><Radio size={18} /></span>
+          <b>No delivery events yet</b>
+          <p>Delivery, bounce, and complaint events from Resend will appear here.</p>
+        </div>
+      ) : (
+        <ol className="feed-list" aria-hidden={tick /* re-render for relative times */}>
+          <AnimatePresence initial={false}>
+            {events.map((e) => {
+              const meta = EVENT_META[e.type] || { label: e.type, tone: "muted", icon: Mail };
+              const Icon = meta.icon;
+              return (
+                <motion.li
+                  key={e.id}
+                  className={`feed-item ${meta.tone}`}
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.25 }}
+                  data-testid={`feed-item-${e.type}`}
+                >
+                  <span className="feed-dot"><Icon size={12} /></span>
+                  <div className="feed-body">
+                    <b>{meta.label}</b>
+                    <span className="feed-email">{e.email}</span>
+                    {e.reason && <em>{e.reason}</em>}
+                  </div>
+                  <span className="feed-time">{relativeTime(e.at)}</span>
+                </motion.li>
+              );
+            })}
+          </AnimatePresence>
+        </ol>
+      )}
+    </section>
+  );
 }
 
 export default function CampaignDetail() {
@@ -122,6 +216,11 @@ export default function CampaignDetail() {
         </NavLink>
         <Status status={campaign.status} />
       </div>
+
+      <DeliveryFeed
+        campaignId={campaign.id}
+        live={["QUEUED", "READY_TO_SEND", "SENDING"].includes(campaign.status)}
+      />
 
       <div className="detail-metrics">
         {[
