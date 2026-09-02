@@ -10,6 +10,9 @@ import {
   Copy,
   Plus,
   ExternalLink,
+  ShieldCheck,
+  Inbox,
+  Clock,
 } from "lucide-react";
 import { api, auth, errorText } from "@/lib/apiClient";
 import { Page } from "@/components/Layout";
@@ -82,16 +85,19 @@ export default function DomainSetup() {
   const [sender, setSender] = useState({ sender_email: "", default_sender_email: "" });
   const [savingSender, setSavingSender] = useState(false);
   const [senderNote, setSenderNote] = useState("");
+  const [method, setMethod] = useState({ method: "verified_domain", options: [] });
 
   async function refresh() {
     setLoading(true);
     try {
-      const [dRes, sRes] = await Promise.all([
+      const [dRes, sRes, mRes] = await Promise.all([
         api.get("/settings/domains", auth()),
         api.get("/settings/sender", auth()),
+        api.get("/settings/sending-method", auth()),
       ]);
       setState(dRes.data);
       setSender((s) => ({ ...sRes.data, sender_email: sRes.data.sender_email || "" }));
+      setMethod(mRes.data);
     } catch (e) {
       setError(errorText(e));
     } finally {
@@ -171,12 +177,81 @@ export default function DomainSetup() {
     }
   }
 
+  async function chooseMethod(id) {
+    if (id === method.method) return;
+    setError("");
+    try {
+      const r = await api.put("/settings/sending-method", { method: id }, auth());
+      setMethod((m) => ({ ...m, method: r.data.method, mailbox_provider: r.data.mailbox_provider }));
+    } catch (e) {
+      setError(errorText(e));
+    }
+  }
+
   return (
     <Page
       title="Connect your sender domain."
       subtitle="Verify a domain with Resend so campaigns can reach anyone — not just your account owner."
     >
-      <section className="settings-section" data-testid="sender-section">
+      <section className="settings-section" data-testid="sending-method-section">
+        <div className="section-head">
+          <div>
+            <p className="eyebrow">SENDING METHOD</p>
+            <h2>How you send</h2>
+            <p className="muted">
+              Choose the mode that fits this workspace. You can only send bulk campaigns from a verified
+              domain — personal mailbox mode is limited to low-volume messages.
+            </p>
+          </div>
+        </div>
+        <div className="method-grid" data-testid="method-grid">
+          {(method.options || []).map((opt) => {
+            const active = method.method === opt.id;
+            const Icon = opt.id === "verified_domain" ? ShieldCheck : Inbox;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => opt.available && chooseMethod(opt.id)}
+                className={`method-card ${active ? "active" : ""} ${!opt.available ? "disabled" : ""}`}
+                data-testid={`method-${opt.id}`}
+                disabled={!opt.available}
+                aria-pressed={active}
+              >
+                <span className="method-icon"><Icon size={18} /></span>
+                <div className="method-body">
+                  <div className="method-title">
+                    <b>{opt.name}</b>
+                    {opt.coming_soon && (
+                      <span className="method-tag" data-testid={`method-${opt.id}-badge`}>
+                        <Clock size={11} /> Coming soon
+                      </span>
+                    )}
+                    {active && <span className="method-check"><Check size={12} /> Selected</span>}
+                  </div>
+                  <p>{opt.description}</p>
+                  {opt.max_recipients && (
+                    <small className="method-meta">Max {opt.max_recipients} recipients per campaign</small>
+                  )}
+                  {opt.providers && (
+                    <div className="method-subs">
+                      {opt.providers.map((p) => (
+                        <span key={p.id} className="method-sub">
+                          {p.name}
+                          {p.coming_soon && <em> · soon</em>}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {opt.notes && <small className="method-note">{opt.notes}</small>}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="settings-section" style={{ marginTop: 18 }} data-testid="sender-section">
         <div className="section-head">
           <div>
             <p className="eyebrow">FROM ADDRESS</p>

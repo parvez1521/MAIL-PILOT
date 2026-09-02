@@ -36,7 +36,7 @@ def now():
 
 
 def public_user(doc):
-    return {"id": str(doc.get("id", "")), "email": doc["email"], "name": doc.get("name", doc["email"].split("@")[0]), "sender_email": doc.get("sender_email")}
+    return {"id": str(doc.get("id", "")), "email": doc["email"], "name": doc.get("name", doc["email"].split("@")[0]), "sender_email": doc.get("sender_email"), "sending_method": doc.get("sending_method") or "verified_domain"}
 
 
 def token_for(user_id):
@@ -79,6 +79,14 @@ class SenderInput(BaseModel):
 
 class DomainInput(BaseModel):
     name: str = Field(min_length=3, max_length=253)
+
+
+SENDING_METHODS = {"verified_domain", "personal_mailbox"}
+
+
+class SendingMethodInput(BaseModel):
+    method: str = Field(min_length=3, max_length=32)
+    provider: Optional[str] = None
 
 
 def user_sender(user) -> str:
@@ -148,7 +156,29 @@ class ResendEmailProvider(EmailProviderAdapter):
         return {"provider_id": result["id"], "status": "accepted"}
 
 
-def provider() -> EmailProviderAdapter:
+class GmailAdapter(EmailProviderAdapter):
+    """Placeholder for OAuth-based Gmail sending. Not implemented yet — enable when OAuth flow ships."""
+    name = "gmail"
+
+    async def send(self, recipient, subject, html, idempotency_key, list_unsubscribe=None, sender=None):
+        raise HTTPException(400, "Gmail personal-mailbox sending is coming soon. Switch to a verified domain to send today.")
+
+
+class OutlookAdapter(EmailProviderAdapter):
+    """Placeholder for OAuth-based Microsoft/Outlook sending. Not implemented yet — enable when OAuth flow ships."""
+    name = "outlook"
+
+    async def send(self, recipient, subject, html, idempotency_key, list_unsubscribe=None, sender=None):
+        raise HTTPException(400, "Outlook personal-mailbox sending is coming soon. Switch to a verified domain to send today.")
+
+
+def provider(user=None) -> EmailProviderAdapter:
+    method = (user or {}).get("sending_method") or "verified_domain"
+    if method == "personal_mailbox":
+        chosen = ((user or {}).get("mailbox_provider") or "gmail").lower()
+        if chosen == "outlook":
+            return OutlookAdapter()
+        return GmailAdapter()
     if EMAIL_PROVIDER == "mock":
         return MockEmailProvider()
     return ResendEmailProvider()
@@ -190,6 +220,8 @@ async def register(data: AuthInput):
         "name": data.name or email.split("@")[0],
         "password_hash": bcrypt.hashpw(data.password.encode(), bcrypt.gensalt()).decode(),
         "sender_email": None,
+        "sending_method": "verified_domain",
+        "mailbox_provider": None,
         "created_at": now(),
     }
     await db.users.insert_one(user)
@@ -209,14 +241,14 @@ async def me(user=Depends(current_user)):
     return public_user(user)
 
 
-async def send_transactional(recipient, subject, body, kind, sender=None, campaign_id=None, recipient_id=None):
-    adapter = provider()
+async def send_transactional(recipient, subject, body, kind, sender=None, user=None, campaign_id=None, recipient_id=None):
+    adapter = provider(user)
     key = f"{kind}:{campaign_id or uuid.uuid4()}:{recipient_id or recipient}"
     return await adapter.send(recipient, subject, html_body(body), key, sender=sender)
 
 
-async def send_marketing(recipient, subject, body, kind, sender=None, campaign_id=None, recipient_id=None):
-    adapter = provider()
+async def send_marketing(recipient, subject, body, kind, sender=None, user=None, campaign_id=None, recipient_id=None):
+    adapter = provider(user)
     key = f"{kind}:{campaign_id or uuid.uuid4()}:{recipient_id or recipient}"
     return await adapter.send(recipient, subject, marketing_html(body, recipient), key, list_unsubscribe=unsubscribe_link(recipient), sender=sender)
 
@@ -224,7 +256,7 @@ async def send_marketing(recipient, subject, body, kind, sender=None, campaign_i
 @api.post("/mail/single")
 async def single_mail(data: MailInput, user=Depends(current_user)):
     try:
-        result = await send_transactional(str(data.recipient), data.subject, data.body, "single", sender=user_sender(user))
+        result = await send_transactional(str(data.recipient), data.subject, data.body, "single", sender=user_sender(user), user=user)
     except Exception as exc:
         logger.warning("single-send failure: %s: %s", type(exc).__name__, str(exc)[:200])
         raise HTTPException(400, provider_error_message(exc))
@@ -245,7 +277,7 @@ async def single_mail(data: MailInput, user=Depends(current_user)):
 @api.post("/mail/test")
 async def test_mail(data: MailInput, user=Depends(current_user)):
     try:
-        result = await send_transactional(str(data.recipient), data.subject, data.body, "test", sender=user_sender(user))
+        result = await send_transactional(str(data.recipient), data.subject, data.body, "test", sender=user_sender(user), user=user)
     except Exception as exc:
         logger.warning("test-send failure: %s: %s", type(exc).__name__, str(exc)[:200])
         raise HTTPException(400, provider_error_message(exc))
@@ -352,7 +384,7 @@ async def campaign_test(campaign_id: str, recipient: EmailStr = Form(...), user=
     if not campaign:
         raise HTTPException(404, "Campaign not found")
     try:
-        adapter = provider()
+        adapter = provider(user)
         key = f"campaign_test:{campaign_id}:{recipient}"
         result = await adapter.send(
             str(recipient),
@@ -460,7 +492,7 @@ async def process_job(job_id: str):
     recipients = await db.recipients.find(
         {"campaign_id": job["campaign_id"], "sending_status": "QUEUED"}, {"_id": 0}
     ).to_list(LIMIT)
-    adapter = provider()
+    adapter = provider(owner)
     for rec in recipients:
         if await db.suppressions.find_one({"email": rec["email"]}):
             await db.recipients.update_one(
@@ -698,6 +730,54 @@ async def campaign_events(campaign_id: str, limit: int = 30, user=Depends(curren
 async def list_suppressions(user=Depends(current_user)):
     bad = await known_bad_emails(user["id"])
     return {"count": len(bad), "emails": sorted(bad)}
+
+
+@api.get("/settings/sending-method")
+async def get_sending_method(user=Depends(current_user)):
+    return {
+        "method": user.get("sending_method") or "verified_domain",
+        "mailbox_provider": user.get("mailbox_provider"),
+        "options": [
+            {
+                "id": "verified_domain",
+                "name": "Verified Domain (Resend)",
+                "description": "Send marketing campaigns from a domain you own. Recommended for bulk campaigns up to 500 recipients.",
+                "provider": "resend",
+                "available": True,
+                "max_recipients": LIMIT,
+            },
+            {
+                "id": "personal_mailbox",
+                "name": "Personal Mailbox",
+                "description": "Send low-volume messages from your own Gmail or Outlook via OAuth. Respects your provider's daily sending quota.",
+                "providers": [
+                    {"id": "gmail", "name": "Gmail", "available": False, "coming_soon": True},
+                    {"id": "outlook", "name": "Outlook / Microsoft 365", "available": False, "coming_soon": True},
+                ],
+                "available": False,
+                "coming_soon": True,
+                "notes": "Personal mailbox mode is intended for low-volume sending and will honor provider quotas. OAuth connection is coming soon.",
+            },
+        ],
+    }
+
+
+@api.put("/settings/sending-method")
+async def set_sending_method(data: SendingMethodInput, user=Depends(current_user)):
+    if data.method not in SENDING_METHODS:
+        raise HTTPException(400, "Unknown sending method.")
+    if data.method == "personal_mailbox":
+        raise HTTPException(400, "Personal Mailbox mode is coming soon. Stay on Verified Domain for now.")
+    provider_choice = None
+    if data.provider:
+        provider_choice = data.provider.lower()
+        if provider_choice not in {"gmail", "outlook"}:
+            raise HTTPException(400, "Unknown mailbox provider.")
+    await db.users.update_one(
+        {"id": user["id"]},
+        {"$set": {"sending_method": data.method, "mailbox_provider": provider_choice}},
+    )
+    return {"method": data.method, "mailbox_provider": provider_choice}
 
 
 @api.get("/settings/sender")
