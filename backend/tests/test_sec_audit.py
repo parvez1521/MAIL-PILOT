@@ -217,8 +217,12 @@ class TestSEC003SuppressionScope:
                 time.sleep(0.5)
             return cid
 
-        c_recips = ["foo@x.com", "bar@x.com"]
-        d_recips = ["baz@x.com"]
+        _suf = uuid.uuid4().hex[:8]
+        foo_email = f"foo_{_suf}@x.com"
+        bar_email = f"bar_{_suf}@x.com"
+        baz_email = f"baz_{_suf}@x.com"
+        c_recips = [foo_email, bar_email]
+        d_recips = [baz_email]
         run_campaign(tokC, c_recips)
         run_campaign(tokD, d_recips)
 
@@ -230,8 +234,8 @@ class TestSEC003SuppressionScope:
             c.close()
             return rec
 
-        foo_rec = asyncio.run(get_pid(uidC, "foo@x.com"))
-        baz_rec = asyncio.run(get_pid(uidD, "baz@x.com"))
+        foo_rec = asyncio.run(get_pid(uidC, foo_email))
+        baz_rec = asyncio.run(get_pid(uidD, baz_email))
         assert foo_rec and foo_rec.get("provider_message_id"), "foo recipient not sent"
         assert baz_rec and baz_rec.get("provider_message_id"), "baz recipient not sent"
 
@@ -239,7 +243,7 @@ class TestSEC003SuppressionScope:
         r = requests.post(f"{API}/webhooks/resend",
                           headers={"x-webhook-secret": WEBHOOK_SECRET},
                           json={"type": "email.complained",
-                                "data": {"to": ["foo@x.com"], "email_id": foo_rec["provider_message_id"]}})
+                                "data": {"to": [foo_email], "email_id": foo_rec["provider_message_id"]}})
         assert r.status_code == 200
 
         # bounce webhook for baz
@@ -253,16 +257,16 @@ class TestSEC003SuppressionScope:
         rc = requests.get(f"{API}/suppressions", headers=_hdr(tokC))
         assert rc.status_code == 200
         emails_c = set(rc.json().get("emails", []))
-        assert "foo@x.com" in emails_c
-        assert "baz@x.com" not in emails_c
-        assert "bar@x.com" not in emails_c
+        assert foo_email in emails_c
+        assert baz_email not in emails_c
+        assert bar_email not in emails_c
 
         # (b) suppressions for D only lists baz
         rd = requests.get(f"{API}/suppressions", headers=_hdr(tokD))
         assert rd.status_code == 200
         emails_d = set(rd.json().get("emails", []))
-        assert "baz@x.com" in emails_d
-        assert "foo@x.com" not in emails_d
+        assert baz_email in emails_d
+        assert foo_email not in emails_d
 
 
 # --------------------------- SEC-004 -----------------------------------

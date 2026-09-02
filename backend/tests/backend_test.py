@@ -36,6 +36,8 @@ if os.path.exists(_env_path):
             _env[k.strip()] = v.strip().strip('"').strip("'")
 JWT_SECRET = _env.get("JWT_SECRET", "")
 EMAIL_PROVIDER = _env.get("EMAIL_PROVIDER", "resend").lower()
+WEBHOOK_SECRET = _env.get("RESEND_WEBHOOK_SECRET", "")
+WH_HDR = {"x-webhook-secret": WEBHOOK_SECRET}
 
 
 def unsubscribe_token(email: str) -> str:
@@ -164,22 +166,22 @@ def test_full_bulk_happy_path_with_progress_and_webhooks():
 
     r = requests.post(
         f"{BASE_URL}/api/webhooks/resend",
-        json={"type": "email.delivered", "data": {"email_id": pmid_map[emails[0]]}}, timeout=15,
+        headers=WH_HDR, json={"type": "email.delivered", "data": {"email_id": pmid_map[emails[0]]}}, timeout=15,
     )
     assert r.status_code == 200
     r = requests.post(
         f"{BASE_URL}/api/webhooks/resend",
-        json={"type": "email.bounced", "data": {"email_id": pmid_map[emails[1]]}}, timeout=15,
+        headers=WH_HDR, json={"type": "email.bounced", "data": {"email_id": pmid_map[emails[1]]}}, timeout=15,
     )
     assert r.status_code == 200
     r = requests.post(
         f"{BASE_URL}/api/webhooks/resend",
-        json={"type": "email.complained", "data": {"email_id": pmid_map[emails[2]], "to": [emails[2]]}}, timeout=15,
+        headers=WH_HDR, json={"type": "email.complained", "data": {"email_id": pmid_map[emails[2]], "to": [emails[2]]}}, timeout=15,
     )
     assert r.status_code == 200
     r = requests.post(
         f"{BASE_URL}/api/webhooks/resend",
-        json={"type": "email.failed", "data": {"email_id": pmid_map[emails[3]], "reason": "smtp reject"}}, timeout=15,
+        headers=WH_HDR, json={"type": "email.failed", "data": {"email_id": pmid_map[emails[3]], "reason": "smtp reject"}}, timeout=15,
     )
     assert r.status_code == 200
 
