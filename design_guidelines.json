@@ -1,0 +1,43 @@
+{
+  "app_name": "MailPilot",
+  "context": "Email campaign management tool for non-technical users",
+  "archetype": "ORGANIC & EARTHY & CLEAN SAAS (Archetype 1 / Swiss high-contrast hybrid)",
+  "typography": {
+    "heading": "Cabinet Grotesk, Outfit, sans-serif",
+    "body": "Inter, IBM Plex Sans, sans-serif",
+    "code": "JetBrains Mono, monospace"
+  },
+  "colors": {
+    "primary": "#0F172A",
+    "accent": "#2563EB",
+    "success": "#16A34A",
+    "warning": "#CA8A04",
+    "danger": "#DC2626",
+    "background": "#F8FAFC",
+    "surface": "#FFFFFF",
+    "border": "#E2E8F0",
+    "text_primary": "#0F172A",
+    "text_muted": "#64748B",
+    "forbidden_check": "No #7351B7 or #1B93A4 used for dashboards"
+  },
+  "grids": {
+    "dashboard_mode": "High Density Bento Grid",
+    "gap": "gap-6",
+    "columns": "grid-cols-1 md:grid-cols-4 lg:grid-cols-12"
+  },
+  "components": [
+    "Dashboard Summary & Limit Widget (500 recipients limit)",
+    "Single Mail Composer & Mock Sender",
+    "Bulk Campaign Workflow (CSV Parser, Deduplication, Validator)",
+    "Mandatory Test Email Gate with Explicit Confirmation",
+    "Dedicated Test Mail Page",
+    "Recent Campaigns & Status Badges (DRAFT, RECIPIENTS_VALIDATED, TEST_PENDING, TEST_SENT, READY_TO_SEND, SENDING, COMPLETED, FAILED, CANCELLED)",
+    "Account and Settings Area with recipient usage limits",
+    "JWT Authentication (Sign Up / Sign In)"
+  ],
+  "image_urls": {
+    "analytics_preview": "https://images.unsplash.com/photo-1551288049-bebda4e38f71?crop=entropy&cs=srgb&fm=jpg&q=85",
+    "saas_dashboard": "https://images.unsplash.com/photo-1526628953301-3e589a6a8b74?crop=entropy&cs=srgb&fm=jpg&q=85"
+  },
+  "instructions_to_main_agent": "Ensure all interactive elements have data-testid attributes. Use React.js (.js files), Tailwind CSS, FastAPI backend, and MongoDB. Implement full CSV upload parsing and validation with 500 recipient limit enforcement, mandatory test email gate, and explicit confirmation before bulk send. Enforce secure JWT auth and ensure all campaign states are handled correctly."
+}
