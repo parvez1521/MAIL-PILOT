@@ -1,0 +1,29 @@
+{
+  "summary": "Iteration 8 — security-audit verification of SEC-001..SEC-004 + regression. Ran /app/backend/tests/test_sec_audit.py under EMAIL_PROVIDER=resend (11 passed, 2 skipped: SEC-003 send-loop & full happy-path require mock) AND under EMAIL_PROVIDER=mock (12 passed, 1 skipped: SEC-002 requires resend). Union = 13/13 pass. All four security fixes verified: (SEC-001) webhook is fail-closed — no headers / wrong x-webhook-secret / malformed svix-signature all return 401 and produce zero side effects in db.suppressions or db.recipients; correct 'x-webhook-secret: <RESEND_WEBHOOK_SECRET>' path processes email.complained (upserts suppression with source='complaint') and email.bounced (updates recipient by data.email_id to sending_status=BOUNCED). (SEC-002) Domain ownership guard fires correctly cross-tenant: seeded owned_domains row for user A with domain_id='dom_A_*'; as user B, GET /api/settings/domains does NOT list dom_A, DELETE /dom_A returns 404 and Mongo row for A is preserved, GET /dom_A and POST /dom_A/verify both return 404 — confirming _require_owned_domain fires before any Resend SDK call. (SEC-003) /api/suppressions is scoped per user: user C sees only foo@x.com (their complained recipient), user D sees only baz@x.com (their bounced recipient); neither sees the other's addresses, no global leakage. (SEC-004) POST /api/campaigns with a ~1.1MB CSV returns 413 and creates 0 campaigns for that user; a 3-row CSV still returns 200 with valid_count=3. Regression: full mock happy path (create→test→confirm→send→poll) reached COMPLETED with progress_percentage=100; unsubscribe HMAC bad-token→400, good-token→200. EMAIL_PROVIDER restored to 'resend' in /app/backend/.env and backend restarted.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_sec_audit.py",
+    "/app/test_reports/pytest/pytest_iter8_resend.xml",
+    "/app/test_reports/pytest/pytest_iter8_mock.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "verify_webhook() correctly fails closed when WEBHOOK_SECRET is empty and uses hmac.compare_digest for both the shared-secret fallback and the Svix signature — no timing side channel.",
+    "resend_webhook uses find_one_and_update on provider_message_id; email.complained additionally reads data.to to upsert the suppression even if no recipient row matches (accounts for out-of-app sends). Good.",
+    "_require_owned_domain runs BEFORE resend.Domains.get/verify/remove in get/verify/remove_domain, so a cross-tenant probe returns 404 without any outbound Resend call — matches the intent of SEC-002.",
+    "MAX_UPLOAD_BYTES=512KB check is done twice (content-length pre-parse AND file.read cap) — good defence in depth for chunked/streamed uploads that omit Content-Length.",
+    "list_suppressions rewritten to derive the user's own bad addresses from db.recipients scoped by user_id — no cross-tenant leakage. Note it no longer surfaces addresses suppressed via the /unsubscribe HMAC endpoint (those live in db.suppressions but are not tied to a user_id). Not a security issue, but worth noting if product wants unsubscribes to appear in the caller's list (would need a per-user unsubscribe record or a join)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_sec_audit.py (new — SEC-001..SEC-004 + regression suite)",
+    "/app/backend/.env (temporarily toggled EMAIL_PROVIDER to mock for SEC-003/happy-path; RESTORED to 'resend' at end — verified via grep)"
+  ],
+  "success_rate": {"backend": "100% (union 13/13 across resend+mock runs; 0 failures)", "frontend": "N/A (backend-only iteration per request)"},
+  "test_credentials": "Fresh users per test via POST /api/auth/register with password 'testpass123'. RESEND_WEBHOOK_SECRET read from /app/backend/.env for shared-secret webhook signing.",
+  "seed_data_creation": "All test artifacts prefixed TEST_ and cleaned up in-test (owned_domains row for SEC-002, seeded recipient/campaign for SEC-001 bounce mapping, suppressions rows for SEC-001/SEC-003 happy-path unsubscribe test).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All four SEC-* fixes verified end-to-end. To re-run: (1) with EMAIL_PROVIDER=resend, run `pytest /app/backend/tests/test_sec_audit.py` — SEC-003 send-loop and full happy-path will SKIP (require mock provider). (2) Toggle EMAIL_PROVIDER=mock in /app/backend/.env, `sudo supervisorctl restart backend`, re-run — SEC-002 will SKIP (requires resend mode). (3) ALWAYS restore EMAIL_PROVIDER=resend and restart backend at end. WEBHOOK_SECRET is read from .env at import time in server.py (module constant), so it does not need a restart between webhook test runs as long as the value stays constant. Two prior report files remain: iteration_7.json (core 19 items) and this iteration_8.json (security audit).",
+  "rca of the issue": "No production issues found. All four security fixes are correctly implemented and enforced by the code paths described in /app/backend/server.py: verify_webhook() (fail-closed), _require_owned_domain() (cross-tenant guard before any Resend SDK call), list_suppressions() rewrite (per-user scoping via recipients.user_id), and create_campaign() content-length + read-cap 413 rejection at 512KB."
+}

@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from html import escape
 from urllib.parse import quote
-import asyncio, csv, io, os, re, bcrypt, jwt, uuid, hmac, hashlib, logging
+import asyncio, csv, io, os, re, bcrypt, jwt, uuid, hmac, hashlib, logging, base64
 import resend
 
 ROOT_DIR = Path(__file__).parent
@@ -22,6 +22,7 @@ EMAIL_PROVIDER = os.environ.get("EMAIL_PROVIDER", "resend").lower()
 WEBHOOK_SECRET = os.environ.get("RESEND_WEBHOOK_SECRET", "")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "").rstrip("/")
 LIMIT = 500
+MAX_UPLOAD_BYTES = 512 * 1024  # 500 recipients × ~100 chars/line + overhead
 logger = logging.getLogger("mailpilot")
 logging.basicConfig(level=logging.INFO)
 
@@ -95,6 +96,30 @@ def user_sender(user) -> str:
 
 def unsubscribe_token(email: str) -> str:
     return hmac.new(JWT_SECRET.encode(), email.lower().encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def verify_webhook(headers, body: bytes) -> bool:
+    """Fail-closed webhook verification. Supports Svix (Resend) signatures and a simple shared-secret header."""
+    if not WEBHOOK_SECRET:
+        return False
+    svix_id = headers.get("svix-id")
+    svix_ts = headers.get("svix-timestamp")
+    svix_sig = headers.get("svix-signature")
+    if svix_id and svix_ts and svix_sig:
+        try:
+            raw = WEBHOOK_SECRET.split("_", 1)[1] if WEBHOOK_SECRET.startswith("whsec_") else WEBHOOK_SECRET
+            secret_bytes = base64.b64decode(raw)
+            signed = f"{svix_id}.{svix_ts}.".encode() + body
+            expected = base64.b64encode(hmac.new(secret_bytes, signed, hashlib.sha256).digest()).decode()
+            for part in svix_sig.split():
+                if "," in part:
+                    _, sig = part.split(",", 1)
+                    if hmac.compare_digest(sig, expected):
+                        return True
+        except Exception:
+            pass
+    supplied = headers.get("x-webhook-secret", "")
+    return bool(supplied) and hmac.compare_digest(supplied, WEBHOOK_SECRET)
 
 
 def unsubscribe_link(email: str) -> str:
@@ -312,13 +337,20 @@ def parse_recipients(raw: bytes):
 
 @api.post("/campaigns")
 async def create_campaign(
+    request: Request,
     name: str = Form(...),
     subject: str = Form(...),
     body: str = Form(...),
     file: UploadFile = File(...),
     user=Depends(current_user),
 ):
-    valid, invalid = parse_recipients(await file.read())
+    content_length = request.headers.get("content-length")
+    if content_length and content_length.isdigit() and int(content_length) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"CSV upload is too large. Keep the request under {MAX_UPLOAD_BYTES // 1024} KB.")
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"CSV upload is too large. Keep the file under {MAX_UPLOAD_BYTES // 1024} KB.")
+    valid, invalid = parse_recipients(raw)
     bad = await known_bad_emails(user["id"])
     auto_cleaned = [e for e in valid if e in bad]
     valid = [e for e in valid if e not in bad]
@@ -634,8 +666,7 @@ async def unsubscribe(data: UnsubscribeInput):
 @api.post("/webhooks/resend")
 async def resend_webhook(request: Request):
     body = await request.body()
-    supplied = request.headers.get("x-webhook-secret", "")
-    if WEBHOOK_SECRET and not hmac.compare_digest(supplied, WEBHOOK_SECRET):
+    if not verify_webhook(request.headers, body):
         raise HTTPException(401, "Invalid webhook signature")
     try:
         event = await request.json()
@@ -728,8 +759,15 @@ async def campaign_events(campaign_id: str, limit: int = 30, user=Depends(curren
 
 @api.get("/suppressions")
 async def list_suppressions(user=Depends(current_user)):
-    bad = await known_bad_emails(user["id"])
-    return {"count": len(bad), "emails": sorted(bad)}
+    """Return the caller's OWN suppression signals (bounces, complaints, failures, unsubscribes on their own campaigns).
+    Does NOT expose global cross-tenant suppression data."""
+    own_bad = set(
+        await db.recipients.distinct(
+            "email",
+            {"user_id": user["id"], "sending_status": {"$in": ["BOUNCED", "COMPLAINED", "FAILED", "SUPPRESSED"]}},
+        )
+    )
+    return {"count": len(own_bad), "emails": sorted(own_bad)}
 
 
 @api.get("/settings/sending-method")
@@ -827,7 +865,15 @@ async def list_domains(user=Depends(current_user)):
         logger.warning("Domains.list failure: %s: %s", type(exc).__name__, str(exc)[:200])
         return {"provider": "resend", "domains": [], "can_manage": False, "reason": provider_error_message(exc)}
     items = result.get("data", []) if isinstance(result, dict) else (result or [])
-    return {"provider": "resend", "domains": [_sanitize_domain(d) for d in items], "can_manage": True}
+    owned_ids = set(await db.owned_domains.distinct("domain_id", {"user_id": user["id"]}))
+    scoped = [d for d in items if d.get("id") in owned_ids]
+    return {"provider": "resend", "domains": [_sanitize_domain(d) for d in scoped], "can_manage": True}
+
+
+async def _require_owned_domain(user_id: str, domain_id: str):
+    owned = await db.owned_domains.find_one({"user_id": user_id, "domain_id": domain_id})
+    if not owned:
+        raise HTTPException(404, "Domain not found")
 
 
 @api.post("/settings/domains")
@@ -838,12 +884,20 @@ async def add_domain(data: DomainInput, user=Depends(current_user)):
     except Exception as exc:
         logger.warning("Domains.create failure: %s: %s", type(exc).__name__, str(exc)[:200])
         raise HTTPException(400, provider_error_message(exc))
+    domain_id = (result or {}).get("id") if isinstance(result, dict) else None
+    if domain_id:
+        await db.owned_domains.update_one(
+            {"user_id": user["id"], "domain_id": domain_id},
+            {"$set": {"user_id": user["id"], "domain_id": domain_id, "name": data.name.strip().lower(), "created_at": now()}},
+            upsert=True,
+        )
     return {"domain": _sanitize_domain(result)}
 
 
 @api.get("/settings/domains/{domain_id}")
 async def get_domain(domain_id: str, user=Depends(current_user)):
     _resend_ready()
+    await _require_owned_domain(user["id"], domain_id)
     try:
         result = await asyncio.to_thread(resend.Domains.get, domain_id)
     except Exception as exc:
@@ -855,6 +909,7 @@ async def get_domain(domain_id: str, user=Depends(current_user)):
 @api.post("/settings/domains/{domain_id}/verify")
 async def verify_domain(domain_id: str, user=Depends(current_user)):
     _resend_ready()
+    await _require_owned_domain(user["id"], domain_id)
     try:
         result = await asyncio.to_thread(resend.Domains.verify, domain_id)
     except Exception as exc:
@@ -866,11 +921,13 @@ async def verify_domain(domain_id: str, user=Depends(current_user)):
 @api.delete("/settings/domains/{domain_id}")
 async def remove_domain(domain_id: str, user=Depends(current_user)):
     _resend_ready()
+    await _require_owned_domain(user["id"], domain_id)
     try:
         await asyncio.to_thread(resend.Domains.remove, domain_id)
     except Exception as exc:
         logger.warning("Domains.remove failure: %s: %s", type(exc).__name__, str(exc)[:200])
         raise HTTPException(400, provider_error_message(exc))
+    await db.owned_domains.delete_one({"user_id": user["id"], "domain_id": domain_id})
     return {"removed": True}
 
 
@@ -891,6 +948,7 @@ async def startup():
     await db.recipients.create_index("provider_message_id", sparse=True)
     await db.suppressions.create_index("email", unique=True)
     await db.delivery_events.create_index([("campaign_id", 1), ("at", -1)])
+    await db.owned_domains.create_index([("user_id", 1), ("domain_id", 1)], unique=True)
 
 
 @app.on_event("shutdown")
